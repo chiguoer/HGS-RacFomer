@@ -1,0 +1,28 @@
+{
+    // Use IntelliSense to learn about possible attributes.
+    // Hover to view descriptions of existing attributes.
+    // For more information, visit: https://go.microsoft.com/fwlink/?linkid=830387
+    "version": "0.2.0",
+    "configurations": [
+        {
+            "name": "dataset for tj4d",
+            "type": "debugpy",
+            "request": "launch",
+            "program": "${file}",
+            "console": "integratedTerminal",
+            "justMyCode": false,
+            "args": ["create_kitti_infos", "tools/cfgs/dataset_configs/tj4d_fusion.yaml"],
+            "cwd": "/media/yellowstone/databig/code/OpenPCDet_VoD_new"
+        },
+        {
+            "name": "Python Debugger: Current File",
+            "type": "debugpy",
+            "request": "launch",
+            "program": "${file}",
+            "console": "integratedTerminal",
+            "justMyCode": false,
+            "cwd": "/media/yellowstone/databig/code/OpenPCDet_VoD_new"
+            // "args": ["--sync_bn"],
+        }
+    ]
+}
