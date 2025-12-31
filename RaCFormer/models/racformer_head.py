@@ -323,6 +323,36 @@ class RaCFormer_head(DETRHead):
         
         # 确保query_bbox在正确的设备上
         query_bbox = query_bbox.to(device)
+        
+        # ============================================================
+        # DEBUG: 验证query_bbox坐标范围
+        # Transformer期望 (theta, d, z) 都在 [0, 1] 范围内
+        # ============================================================
+        if self.training or True:  # 始终打印调试信息（可在稳定后移除）
+            theta_vals = query_bbox[..., 0]
+            d_vals = query_bbox[..., 1]
+            z_vals = query_bbox[..., 2]
+            print(f"[DEBUG RWHI] query_bbox shape: {query_bbox.shape}")
+            print(f"[DEBUG RWHI] theta: min={theta_vals.min().item():.4f}, max={theta_vals.max().item():.4f}")
+            print(f"[DEBUG RWHI] d:     min={d_vals.min().item():.4f}, max={d_vals.max().item():.4f}")
+            print(f"[DEBUG RWHI] z:     min={z_vals.min().item():.4f}, max={z_vals.max().item():.4f}")
+            
+            # 检查是否有超出范围的值
+            if theta_vals.min() < 0 or theta_vals.max() > 1:
+                print(f"[WARNING RWHI] theta out of [0,1] range!")
+            if d_vals.min() < 0 or d_vals.max() > 1:
+                print(f"[WARNING RWHI] d out of [0,1] range!")
+            if z_vals.min() < 0 or z_vals.max() > 1:
+                print(f"[WARNING RWHI] z out of [0,1] range!")
+        
+        # ============================================================
+        # 关键修复: 强制clamp所有坐标到[0, 1]
+        # 确保即使RWHI输出有轻微超范围，也不会导致Transformer失效
+        # ============================================================
+        query_bbox = query_bbox.clone()
+        query_bbox[..., 0] = torch.clamp(query_bbox[..., 0], 0.0, 1.0)  # theta
+        query_bbox[..., 1] = torch.clamp(query_bbox[..., 1], 0.0, 1.0)  # d
+        query_bbox[..., 2] = torch.clamp(query_bbox[..., 2], 0.0, 1.0)  # z
 
         query_bbox, query_feat, attn_mask, mask_dict = self.prepare_for_dn_input(B, query_bbox, self.label_enc, img_metas)
 

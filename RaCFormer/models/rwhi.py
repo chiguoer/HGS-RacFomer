@@ -118,6 +118,8 @@ class RWHIModule(BaseModule):
         
         近场密集，远场稀疏，使用同心圆分布
         
+        与原始 generate_points() 保持一致的距离覆盖范围！
+        
         Returns:
             safety_anchors: [num_safety, 10] (theta, d, z, w, l, h, sin, cos, vx, vy)
         """
@@ -127,14 +129,20 @@ class RWHIModule(BaseModule):
         points_per_ring = self.num_safety // num_rings
         remainder = self.num_safety - num_rings * points_per_ring
         
+        # ============================================================
+        # 修复: 扩大距离覆盖范围
+        # 原代码: distances * 0.4 + 0.05 只覆盖 [0.05, 0.45]
+        # 原始 generate_points() 使用 linspace(0, 1, N+2)[1:-1]
+        # 即距离均匀分布在 (0, 1) 范围内
+        # 修改为覆盖更大范围 [0.05, 0.85]，以匹配原始分布
+        # ============================================================
         # 逆深度采样: 近处密集
-        # 使用 1/r 分布，r从1到safety_max_range
-        inv_depths = torch.linspace(1.0, 0.1, num_rings)  # 逆深度从1到0.1
-        distances = 1.0 / inv_depths  # 实际距离
+        inv_depths = torch.linspace(1.0, 0.15, num_rings)  # 逆深度从1到0.15
+        distances = 1.0 / inv_depths  # 实际距离，范围约 [1, 6.67]
         distances = distances / distances.max()  # 归一化到[0, 1]
         
-        # 确保最近的点不在原点
-        distances = distances * 0.4 + 0.05  # 映射到[0.05, 0.45]范围 (对应约3m-30m)
+        # 映射到 [0.05, 0.85] 范围，覆盖近场到中远场
+        distances = distances * 0.8 + 0.05
         
         anchors_list = []
         
@@ -310,10 +318,22 @@ class RWHIModule(BaseModule):
         B, _, H, W = bev_grid.shape
         device = bev_grid.device
         
-        # 应用安全流掩码 (将近处区域置0)
+        # ============================================================
+        # 修复: 正确应用安全流掩码
+        # 原代码 masked_grid[:, :, safety_mask] = 0.0 会导致高级索引错误
+        # 改用 torch.where 或广播乘法
+        # ============================================================
         safety_mask = self.safety_mask.to(device)  # [H, W]
-        masked_grid = bev_grid.clone()
-        masked_grid[:, :, safety_mask] = 0.0
+        # 扩展掩码维度以匹配 bev_grid [B, 1, H, W]
+        safety_mask_expanded = safety_mask.unsqueeze(0).unsqueeze(0)  # [1, 1, H, W]
+        
+        # 使用 where 将安全区域置0（只保留远处区域）
+        # safety_mask=True 表示近处区域，需要置0
+        masked_grid = torch.where(
+            safety_mask_expanded.expand(B, 1, H, W),
+            torch.zeros_like(bev_grid),
+            bev_grid
+        )
         
         # 添加微小噪声防止TopK重复
         noise = torch.rand_like(masked_grid) * self.noise_eps
@@ -327,7 +347,11 @@ class RWHIModule(BaseModule):
         
         _, top_indices = torch.topk(flat_grid, num_samples, dim=1)  # [B, num_samples]
         
+        # ============================================================
         # 将一维索引转换回二维坐标
+        # 网格存储顺序是 [H, W]，展平后索引 = y * W + x
+        # 所以: y_idx = indices // W, x_idx = indices % W
+        # ============================================================
         y_idx = top_indices // W  # [B, num_samples]
         x_idx = top_indices % W   # [B, num_samples]
         
@@ -408,11 +432,13 @@ class RWHIModule(BaseModule):
         """
         将归一化xy坐标转换为theta-d极坐标
         
+        与 bbox/utils.py 中的 xy2theta_d_coods 保持一致！
+        
         Args:
             xy_norm: [B, N, 2] 归一化坐标 [0, 1]
             
         Returns:
-            theta_d: [B, N, 2] 极坐标 (theta归一化到[0,1], d归一化)
+            theta_d: [B, N, 2] 极坐标 (theta归一化到[0,1], d归一化到[0,1])
         """
         map_size = 102.4
         r = 65.0
@@ -429,6 +455,14 @@ class RWHIModule(BaseModule):
         distance = torch.sqrt(dx ** 2 + dy ** 2) / r  # 归一化距离
         theta = torch.atan2(dy, dx)  # [-pi, pi]
         theta = ((theta + 2 * math.pi) % (2 * math.pi)) / (2 * math.pi)  # 归一化到[0, 1]
+        
+        # ============================================================
+        # 关键修复: Clamp theta 和 distance 到 [0, 1] 范围
+        # distance 在网格边角可能超过 1.0 (sqrt(51.2^2 + 51.2^2)/65 ≈ 1.11)
+        # theta 理论上已经在 [0, 1]，但为了安全也 clamp
+        # ============================================================
+        theta = torch.clamp(theta, 0.0, 1.0)
+        distance = torch.clamp(distance, 0.0, 1.0)
         
         theta_d = torch.cat([theta, distance], dim=-1)  # [B, N, 2]
         
