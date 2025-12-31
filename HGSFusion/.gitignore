@@ -1,0 +1,17 @@
+**__pycache__**
+**build**
+**egg-info**
+data/
+*.pyc
+venv/
+*.idea/
+*.so
+*.pth
+*.pkl
+*.zip
+*.bin
+output
+version.py
+*.log
+*.yellowstone-SYS-4029GP-TRT
+*.jpg

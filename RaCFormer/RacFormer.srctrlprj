@@ -1,0 +1,39 @@
+<?xml version="1.0" encoding="utf-8" ?>
+<config>
+    <source_groups>
+        <source_group_b97c80be-2888-434d-b530-04e291f7e388>
+            <name>Python Source Group</name>
+            <python_environment_path>C:/Users/chiguoer/AppData/Local/Programs/Python/Python38</python_environment_path>
+            <source_extensions>
+                <source_extension>.py</source_extension>
+            </source_extensions>
+            <source_paths>
+                <source_path>models/__init__.py</source_path>
+                <source_path>models/bev_self_attention.py</source_path>
+                <source_path>models/checkpoint.py</source_path>
+                <source_path>models/multi_scale_deformable_attn_function.py</source_path>
+                <source_path>models/racformer.py</source_path>
+                <source_path>models/racformer_head.py</source_path>
+                <source_path>models/racformer_transformer.py</source_path>
+                <source_path>models/sparsebev_sampling.py</source_path>
+                <source_path>models/utils.py</source_path>
+                <source_path>models/backbones</source_path>
+                <source_path>models/backbones/resnet.py</source_path>
+                <source_path>models/backbones/vovnet.py</source_path>
+                <source_path>models/backbones/__init__.py</source_path>
+                <source_path>models/model_utils</source_path>
+                <source_path>models/model_utils/attention.py</source_path>
+                <source_path>models/model_utils/__init__.py</source_path>
+                <source_path>models/necks/__init__.py</source_path>
+                <source_path>models/necks/focalloss.py</source_path>
+                <source_path>models/necks/fpn.py</source_path>
+                <source_path>models/necks/lss_fpn.py</source_path>
+                <source_path>models/necks/view_transformer_racformer.py</source_path>
+                <source_path>configs/racformer_r50_nuimg_704x256_f8.py</source_path>
+            </source_paths>
+            <status>enabled</status>
+            <type>Python Source Group</type>
+        </source_group_b97c80be-2888-434d-b530-04e291f7e388>
+    </source_groups>
+    <version>8</version>
+</config>
