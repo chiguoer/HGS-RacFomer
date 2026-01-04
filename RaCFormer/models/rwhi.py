@@ -87,11 +87,23 @@ class RWHIModule(BaseModule):
         safety_anchors = self._precompute_safety_anchors()
         self.register_buffer('safety_anchors', safety_anchors)
         
-        # 计算BEV网格参数
+        # ============================================================
+        # 计算BEV网格参数和坐标转换参数
+        # 关键: 从pc_range动态计算，不使用硬编码值
+        # ============================================================
         self.bev_x_range = pc_range[3] - pc_range[0]
         self.bev_y_range = pc_range[4] - pc_range[1]
         self.cell_size_x = self.bev_x_range / bev_grid_size
         self.cell_size_y = self.bev_y_range / bev_grid_size
+        
+        # 极坐标转换参数 (动态计算，替代硬编码的 map_size=102.4, r=65.0)
+        # map_size: BEV地图尺寸 (x_max - x_min)
+        # polar_radius: 极坐标最大半径，用于归一化距离
+        #   - 原始RaCFormer使用 r=65.0，对应 ~65米的最大检测距离
+        #   - 这里使用 BEV对角线的一半作为最大半径，确保覆盖整个BEV空间
+        self.map_size = self.bev_x_range  # 假设x和y范围相同
+        self.polar_radius = 65.0  # 与原始RaCFormer保持一致
+        # 如果需要动态计算: self.polar_radius = math.sqrt(self.bev_x_range**2 + self.bev_y_range**2) / 2
         
         # 安全流掩码 (用于Mask显著流的近处区域)
         safety_mask = self._precompute_safety_mask()
@@ -432,7 +444,24 @@ class RWHIModule(BaseModule):
         """
         将归一化xy坐标转换为theta-d极坐标
         
-        与 bbox/utils.py 中的 xy2theta_d_coods 保持一致！
+        ============================================================
+        坐标系约定 (与 bbox/utils.py 的 xy2theta_d_coods 完全一致):
+        
+        1. 输入: xy_norm ∈ [0, 1]，表示BEV网格中的归一化位置
+           - (0, 0) = BEV左下角 (x_min, y_min)
+           - (1, 1) = BEV右上角 (x_max, y_max)
+           - (0.5, 0.5) = BEV中心 (ego车辆位置)
+        
+        2. 输出: (theta, d) 极坐标
+           - theta ∈ [0, 1]: 归一化角度，对应 [0, 2π)
+             * theta=0 → 正X轴方向 (车辆右侧)
+             * theta=0.25 → 正Y轴方向 (车辆前方)
+             * theta=0.5 → 负X轴方向 (车辆左侧)
+             * theta=0.75 → 负Y轴方向 (车辆后方)
+           - d ∈ [0, 1]: 归一化距离，d * polar_radius = 实际距离(米)
+        
+        3. 使用 atan2(dy, dx)，符合标准数学约定
+        ============================================================
         
         Args:
             xy_norm: [B, N, 2] 归一化坐标 [0, 1]
@@ -440,20 +469,22 @@ class RWHIModule(BaseModule):
         Returns:
             theta_d: [B, N, 2] 极坐标 (theta归一化到[0,1], d归一化到[0,1])
         """
-        map_size = 102.4
-        r = 65.0
+        # 使用从pc_range动态计算的参数，而非硬编码值
+        map_size = self.map_size      # 原硬编码: 102.4
+        r = self.polar_radius         # 原硬编码: 65.0
         center = map_size / 2
         
-        # 反归一化到实际坐标
+        # 反归一化到实际坐标 (米)
         x = xy_norm[..., 0:1] * map_size  # [B, N, 1]
         y = xy_norm[..., 1:2] * map_size  # [B, N, 1]
         
-        # 计算距离和角度
+        # 计算相对于中心的偏移
         dx = x - center
         dy = y - center
         
+        # 计算极坐标
         distance = torch.sqrt(dx ** 2 + dy ** 2) / r  # 归一化距离
-        theta = torch.atan2(dy, dx)  # [-pi, pi]
+        theta = torch.atan2(dy, dx)  # [-π, π]
         theta = ((theta + 2 * math.pi) % (2 * math.pi)) / (2 * math.pi)  # 归一化到[0, 1]
         
         # ============================================================

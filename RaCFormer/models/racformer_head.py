@@ -20,6 +20,17 @@ class RaCFormer_head(DETRHead):
     支持两种Query初始化策略:
     1. 原始策略: 均匀极坐标分布 (use_rwhi=False)
     2. RWHI策略: RCS加权混合锚点初始化 (use_rwhi=True)
+    
+    ============================================================
+    [重要修复] 动态内容生成 (Dynamic Content Generation)
+    ============================================================
+    当使用RWHI时，query位置是动态的（每帧基于雷达点云生成）。
+    如果仍使用静态的nn.Embedding作为query内容特征，会导致：
+    - 梯度冲突：模型试图为随机跳动的query学习固定特征
+    - 训练崩溃：loss在epoch 7左右爆炸（从~23到>1000）
+    
+    解决方案：使用pos2content MLP将动态位置转换为动态内容特征。
+    ============================================================
     """
     
     # def __init__(self,
@@ -123,7 +134,18 @@ class RaCFormer_head(DETRHead):
         
         支持两种Query初始化模式:
         1. 原始模式 (use_rwhi=False): 使用nn.Embedding + generate_points()
-        2. RWHI模式 (use_rwhi=True): 使用RWHIModule动态生成锚点
+        2. RWHI模式 (use_rwhi=True): 使用RWHIModule动态生成锚点 + pos2content MLP
+        
+        ============================================================
+        [关键修复] 动态Query需要动态内容特征
+        ============================================================
+        当use_rwhi=True时，query_bbox是动态的（每帧不同）。
+        如果使用静态的label_enc embedding作为query_feat，会导致：
+        - 模型试图为"随机跳动的Embedding #5"学习"它是一辆车"
+        - 梯度冲突 -> 训练崩溃 (epoch 7, loss从23爆炸到1000+)
+        
+        解决方案：使用pos2content MLP从位置生成内容特征。
+        ============================================================
         """
         self.label_enc = nn.Embedding(self.num_classes + 1, self.embed_dims - 1)  # DAB-DETR
         
@@ -156,6 +178,23 @@ class RaCFormer_head(DETRHead):
             
             self.rwhi_module = RWHIModule(**rwhi_default_cfg)
             
+            # ============================================================
+            # [核心修复] Position-to-Content MLP
+            # 将动态位置 (theta, d, z) 转换为动态内容特征
+            # 输出维度是 embed_dims - 1，因为后续要拼接1维的indicator
+            # ============================================================
+            self.pos2content = nn.Sequential(
+                nn.Linear(3, self.embed_dims),
+                nn.LayerNorm(self.embed_dims),
+                nn.ReLU(inplace=True),
+                nn.Linear(self.embed_dims, self.embed_dims - 1),  # -1 for indicator
+            )
+            # 初始化权重 (Xavier for stable training)
+            for module in self.pos2content:
+                if isinstance(module, nn.Linear):
+                    nn.init.xavier_uniform_(module.weight)
+                    nn.init.zeros_(module.bias)
+            
             # 仍然需要init_query_bbox作为后备 (当没有雷达点时)
             self.init_query_bbox = nn.Embedding(self.num_query, 10)
             nn.init.constant_(self.init_query_bbox.weight[:, 2:3], 0.5)
@@ -176,7 +215,7 @@ class RaCFormer_head(DETRHead):
                         fallback_theta_d[:fallback_num].reshape(-1, 2)
         else:
             # ============================================================
-            # 原始模式: 均匀极坐标分布
+            # 原始模式: 均匀极坐标分布 (静态embedding)
             # ============================================================
             self.init_query_bbox = nn.Embedding(self.num_query, 10)  # (x, y, z, w, l, h, sin, cos, vx, vy)
             
@@ -189,6 +228,7 @@ class RaCFormer_head(DETRHead):
                 self.init_query_bbox.weight[:, :2] = theta_d.reshape(-1, 2)  # [Q, 2]
             
             self.rwhi_module = None
+            self.pos2content = None  # 原始模式不需要pos2content
 
     def init_weights(self):
         self.transformer.init_weights()
@@ -279,6 +319,9 @@ class RaCFormer_head(DETRHead):
         # ============================================================
         # Query初始化: RWHI模式 vs 原始模式
         # ============================================================
+        # 标记是否使用了动态RWHI (用于决定是否生成动态content)
+        using_dynamic_rwhi = False
+        
         if self.use_rwhi and self.rwhi_module is not None:
             # 尝试从img_metas获取雷达点云 (如果未显式传入)
             if radar_points is None:
@@ -304,6 +347,7 @@ class RaCFormer_head(DETRHead):
                 
                 # RWHI模式: 使用雷达点云动态生成锚点
                 query_bbox, _ = self.rwhi_module(radar_points)  # [B, Q, 10]
+                using_dynamic_rwhi = True  # 标记使用了动态RWHI
                 
                 # 再次确保batch size一致
                 if query_bbox.shape[0] != B:
@@ -325,25 +369,20 @@ class RaCFormer_head(DETRHead):
         query_bbox = query_bbox.to(device)
         
         # ============================================================
-        # DEBUG: 验证query_bbox坐标范围
+        # DEBUG: 验证query_bbox坐标范围 (可在稳定后移除)
         # Transformer期望 (theta, d, z) 都在 [0, 1] 范围内
         # ============================================================
-        if self.training or True:  # 始终打印调试信息（可在稳定后移除）
+        if self.training:
             theta_vals = query_bbox[..., 0]
             d_vals = query_bbox[..., 1]
             z_vals = query_bbox[..., 2]
-            print(f"[DEBUG RWHI] query_bbox shape: {query_bbox.shape}")
-            print(f"[DEBUG RWHI] theta: min={theta_vals.min().item():.4f}, max={theta_vals.max().item():.4f}")
-            print(f"[DEBUG RWHI] d:     min={d_vals.min().item():.4f}, max={d_vals.max().item():.4f}")
-            print(f"[DEBUG RWHI] z:     min={z_vals.min().item():.4f}, max={z_vals.max().item():.4f}")
-            
-            # 检查是否有超出范围的值
+            # 只在范围异常时打印警告
             if theta_vals.min() < 0 or theta_vals.max() > 1:
-                print(f"[WARNING RWHI] theta out of [0,1] range!")
+                print(f"[WARNING RWHI] theta out of [0,1]: min={theta_vals.min().item():.4f}, max={theta_vals.max().item():.4f}")
             if d_vals.min() < 0 or d_vals.max() > 1:
-                print(f"[WARNING RWHI] d out of [0,1] range!")
+                print(f"[WARNING RWHI] d out of [0,1]: min={d_vals.min().item():.4f}, max={d_vals.max().item():.4f}")
             if z_vals.min() < 0 or z_vals.max() > 1:
-                print(f"[WARNING RWHI] z out of [0,1] range!")
+                print(f"[WARNING RWHI] z out of [0,1]: min={z_vals.min().item():.4f}, max={z_vals.max().item():.4f}")
         
         # ============================================================
         # 关键修复: 强制clamp所有坐标到[0, 1]
@@ -354,7 +393,30 @@ class RaCFormer_head(DETRHead):
         query_bbox[..., 1] = torch.clamp(query_bbox[..., 1], 0.0, 1.0)  # d
         query_bbox[..., 2] = torch.clamp(query_bbox[..., 2], 0.0, 1.0)  # z
 
-        query_bbox, query_feat, attn_mask, mask_dict = self.prepare_for_dn_input(B, query_bbox, self.label_enc, img_metas)
+        # ============================================================
+        # [核心修复] 动态内容生成 (Dynamic Content Generation)
+        # ============================================================
+        # 当使用动态RWHI时，query位置每帧都不同，
+        # 必须使用pos2content MLP从位置生成内容特征，
+        # 而不是使用静态的label_enc embedding。
+        # 这是防止训练崩溃的关键！
+        # ============================================================
+        if using_dynamic_rwhi and self.pos2content is not None:
+            # 动态模式: 从位置生成内容特征
+            query_pos = query_bbox[..., :3]  # [B, Q, 3] (theta, d, z)
+            dynamic_content = self.pos2content(query_pos)  # [B, Q, embed_dims-1]
+            
+            # 添加indicator (0表示非DN query)
+            indicator0 = torch.zeros(B, self.num_query, 1, device=device)
+            init_query_feat = torch.cat([dynamic_content, indicator0], dim=-1)  # [B, Q, embed_dims]
+        else:
+            # 静态模式: 使用原始的label_enc embedding
+            # 这是原始RaCFormer的行为，保持向后兼容
+            init_query_feat = None  # 让prepare_for_dn_input使用默认逻辑
+
+        query_bbox, query_feat, attn_mask, mask_dict = self.prepare_for_dn_input(
+            B, query_bbox, self.label_enc, img_metas, init_query_feat=init_query_feat
+        )
 
         cls_scores, bbox_preds = self.transformer(
             query_bbox,
@@ -400,15 +462,41 @@ class RaCFormer_head(DETRHead):
 
         return outs
 
-    def prepare_for_dn_input(self, batch_size, init_query_bbox, label_enc, img_metas):
-        # mostly borrowed from:
-        #  - https://github.com/IDEA-Research/DN-DETR/blob/main/models/DN_DAB_DETR/dn_components.py
-        #  - https://github.com/megvii-research/PETR/blob/main/projects/mmdet3d_plugin/models/dense_heads/petrv2_dnhead.py
-
+    def prepare_for_dn_input(self, batch_size, init_query_bbox, label_enc, img_metas, init_query_feat=None):
+        """
+        准备Denoising输入
+        
+        Args:
+            batch_size: batch大小
+            init_query_bbox: 初始query位置 [B, Q, 10]
+            label_enc: 标签编码器
+            img_metas: 图像元信息
+            init_query_feat: 可选的预计算query特征 [B, Q, embed_dims]
+                            如果为None，使用静态的label_enc embedding (原始行为)
+                            如果提供，使用动态生成的特征 (RWHI模式)
+        
+        ============================================================
+        [关键修复说明]
+        当使用RWHI时，init_query_feat由pos2content MLP动态生成，
+        而不是使用静态的label_enc.weight[num_classes]。
+        这解决了"动态位置+静态内容"导致的训练崩溃问题。
+        ============================================================
+        
+        References:
+        - https://github.com/IDEA-Research/DN-DETR/blob/main/models/DN_DAB_DETR/dn_components.py
+        - https://github.com/megvii-research/PETR/blob/main/projects/mmdet3d_plugin/models/dense_heads/petrv2_dnhead.py
+        """
         device = init_query_bbox.device
-        indicator0 = torch.zeros([self.num_query, 1], device=device)
-        init_query_feat = label_enc.weight[self.num_classes].repeat(self.num_query, 1)
-        init_query_feat = torch.cat([init_query_feat, indicator0], dim=1).repeat(batch_size, 1, 1)
+        
+        # ============================================================
+        # Query内容特征初始化
+        # ============================================================
+        if init_query_feat is None:
+            # 静态模式 (原始RaCFormer行为): 使用label_enc的背景类embedding
+            indicator0 = torch.zeros([self.num_query, 1], device=device)
+            init_query_feat = label_enc.weight[self.num_classes].repeat(self.num_query, 1)
+            init_query_feat = torch.cat([init_query_feat, indicator0], dim=1).repeat(batch_size, 1, 1)
+        # else: 使用传入的动态init_query_feat (由pos2content生成)
 
         if self.training and self.dn_enabled:
             targets = [{
