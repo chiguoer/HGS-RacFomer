@@ -116,13 +116,12 @@ class RWHIModule(BaseModule):
             padding=diffusion_kernel_size // 2
         )
         
-        # 位置编码层
-        self.pos_embed = nn.Sequential(
-            nn.Linear(3, embed_dims),
-            nn.LayerNorm(embed_dims),
-            nn.ReLU(inplace=True),
-            nn.Linear(embed_dims, embed_dims),
-        )
+        # ============================================================
+        # 注意: pos_embed 层已移除
+        # 原因: racformer_head.py 使用 pos2content MLP 生成内容特征，
+        #       不再需要 RWHIModule 内部的位置编码层。
+        #       保留此注释以便日后参考。
+        # ============================================================
     
     def _precompute_safety_anchors(self):
         """
@@ -550,82 +549,35 @@ class RWHIModule(BaseModule):
         
         return hybrid_anchors, anchor_mask
     
-    def get_position_embedding(self, anchors):
-        """
-        获取锚点的位置编码
-        
-        Args:
-            anchors: [B, N, 10]
-            
-        Returns:
-            pos_embed: [B, N, embed_dims]
-        """
-        # 使用前3维 (theta, d, z) 生成位置编码
-        pos_input = anchors[..., :3]  # [B, N, 3]
-        pos_embed = self.pos_embed(pos_input)  # [B, N, embed_dims]
-        return pos_embed
+    # ============================================================
+    # 注意: get_position_embedding 方法已移除
+    # 原因: racformer_head.py 使用 pos2content MLP 生成内容特征，
+    #       不需要此方法。如需位置编码，请使用 racformer_head.pos2content。
+    # ============================================================
 
 
+# ============================================================
+# RWHIQueryGenerator - 已废弃
+# ============================================================
+# 此类原本用于将RWHI模块与RaCFormer Head集成，但现在:
+# 1. racformer_head.py 直接使用 RWHIModule
+# 2. racformer_head.py 使用自己的 pos2content MLP 生成内容特征
+# 
+# 保留此类定义以保持向后兼容，但不建议使用。
+# 如需Query生成功能，请参考 racformer_head.py 中的实现。
+# ============================================================
 class RWHIQueryGenerator(BaseModule):
     """
-    RWHI Query生成器 - 用于与RaCFormer Head集成
+    [已废弃] RWHI Query生成器
     
-    将RWHI模块的输出转换为RaCFormer兼容的Query格式
+    警告: 此类已废弃，请直接使用 RWHIModule 并在 RaCFormer_head 中
+          使用 pos2content MLP 生成内容特征。
     """
     
-    def __init__(self,
-                 num_query=900,
-                 embed_dims=256,
-                 num_classes=10,
-                 rwhi_cfg=None,
-                 init_cfg=None):
-        super(RWHIQueryGenerator, self).__init__(init_cfg=init_cfg)
-        
-        self.num_query = num_query
-        self.embed_dims = embed_dims
-        self.num_classes = num_classes
-        
-        # 初始化RWHI模块
-        if rwhi_cfg is None:
-            rwhi_cfg = dict(
-                num_query=num_query,
-                safety_ratio=0.3,
-                embed_dims=embed_dims,
-                enabled=True
-            )
-        rwhi_cfg['num_query'] = num_query
-        rwhi_cfg['embed_dims'] = embed_dims
-        
-        self.rwhi = RWHIModule(**rwhi_cfg)
-        
-        # Query特征嵌入 (用于无雷达点时的后备)
-        self.query_embedding = nn.Embedding(num_query, embed_dims)
-    
-    def forward(self, radar_points=None, batch_size=1):
-        """
-        生成Query
-        
-        Args:
-            radar_points: [B, M, C] 雷达点云，可选
-            batch_size: batch大小
-            
-        Returns:
-            query_bbox: [B, num_query, 10] Query位置
-            query_feat: [B, num_query, embed_dims] Query特征
-        """
-        if radar_points is not None:
-            batch_size = radar_points.shape[0]
-        
-        # 获取混合锚点
-        query_bbox, _ = self.rwhi(radar_points)  # [B, num_query, 10]
-        
-        # 生成Query特征
-        if radar_points is not None:
-            # 使用位置编码
-            query_feat = self.rwhi.get_position_embedding(query_bbox)  # [B, N, embed_dims]
-        else:
-            # 使用学习的嵌入
-            query_feat = self.query_embedding.weight.unsqueeze(0).expand(batch_size, -1, -1)
-        
-        return query_bbox, query_feat
+    def __init__(self, *args, **kwargs):
+        raise DeprecationWarning(
+            "RWHIQueryGenerator 已废弃。"
+            "请直接使用 RWHIModule，并在 RaCFormer_head 中使用 pos2content MLP。"
+            "参考: RaCFormer/models/racformer_head.py"
+        )
 
