@@ -61,6 +61,11 @@ model = dict(
 # 1. init_query_bbox (nn.Embedding) 作为后备，仅在无雷达点时使用
 # 2. RWHI模块内部的某些路径可能不总是激活
 # 因此需要设置 find_unused_parameters=True 让DDP忽略未使用的参数
+#
+# MMCV框架要求使用 dist_params 字典格式：
+dist_params = dict(backend='nccl', find_unused_parameters=True)
+
+# 同时设置顶层变量以兼容不同版本的train脚本
 find_unused_parameters = True
 
 # ============================================================

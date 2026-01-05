@@ -409,6 +409,19 @@ class RaCFormer_head(DETRHead):
             # 添加indicator (0表示非DN query)
             indicator0 = torch.zeros(B, self.num_query, 1, device=device)
             init_query_feat = torch.cat([dynamic_content, indicator0], dim=-1)  # [B, Q, embed_dims]
+            
+            # ============================================================
+            # [DDP兼容修复] 确保 init_query_bbox 参与梯度计算
+            # ============================================================
+            # 问题: 在RWHI模式下，init_query_bbox (后备embedding) 不被使用，
+            #       导致DDP报错: "Parameter indices which did not receive grad"
+            # 解决: 添加一个零梯度的虚拟正则化项，使其参与计算图
+            #       乘以0确保不影响实际输出
+            # ============================================================
+            if self.training:
+                dummy_regularizer = self.init_query_bbox.weight.sum() * 0.0
+                # 将虚拟正则化项加到query_bbox的某个不影响输出的位置
+                query_bbox = query_bbox + dummy_regularizer
         else:
             # 静态模式: 使用原始的label_enc embedding
             # 这是原始RaCFormer的行为，保持向后兼容
