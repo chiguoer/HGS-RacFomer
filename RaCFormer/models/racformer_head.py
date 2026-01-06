@@ -153,17 +153,27 @@ class RaCFormer_head(DETRHead):
             # ============================================================
             # RWHI模式: 使用RCS加权混合锚点初始化
             # ============================================================
+            # ============================================================
+            # RWHI v2.0 默认配置 - 叠加策略
+            # ============================================================
             rwhi_default_cfg = dict(
                 num_query=self.num_query,
-                safety_ratio=0.3,
+                # v2.0 新参数: 锚点预算分配
+                num_base=500,                    # 基础锚点 (静态安全网，覆盖全图)
+                num_radar=400,                   # 雷达锚点 (动态增益)
+                # v2.0 新参数: 空间范围
+                max_range=55.0,                  # 最大感知范围 (米) - 覆盖整个BEV!
+                min_range=2.0,                   # 最小感知范围 (米)
+                rcs_threshold=0.0,               # RCS过滤阈值
+                # 共用参数
                 embed_dims=self.embed_dims,
                 pc_range=self.pc_range,
                 bev_grid_size=100,
-                safety_max_range=30.0,
                 velocity_alpha=0.5,
-                height_hypotheses=(0.0, 1.5),
+                height_hypotheses=(0.0, 1.0),
                 diffusion_kernel_size=3,
                 noise_eps=1e-6,
+                epsilon_floor=0.02,
                 enabled=True,
             )
             
