@@ -20,6 +20,11 @@ from mmdet3d.ops import Voxelization
 from .rhgm import RHGM, RHGMWrapper
 from .radar_bev_net import RadarBEVNet, RadarBEVNetWrapper
 
+# ==============================================================================
+# 新增导入 - LGGD模块 (Learnable Gaussian-Geometry Densification)
+# ==============================================================================
+from .lggd import LGGD, LGGDWrapper
+
 
 @DETECTORS.register_module()
 class RaCFormer(MVXTwoStageDetector):
@@ -54,7 +59,13 @@ class RaCFormer(MVXTwoStageDetector):
                  use_rhgm=False,  # 是否启用RHGM模块
                  rhgm_cfg=None,   # RHGM模块配置
                  use_radar_bev_net=False,  # 是否使用RadarBEVNet替换原有雷达编码器
-                 radar_bev_net_cfg=None):  # RadarBEVNet模块配置
+                 radar_bev_net_cfg=None,  # RadarBEVNet模块配置
+                 # ==============================================================================
+                 # 新增参数 - LGGD模块配置 (Learnable Gaussian-Geometry Densification)
+                 # ==============================================================================
+                 use_lggd=False,  # 是否使用LGGD模块
+                 lggd_cfg=None,   # LGGD模块配置
+                 radar_encoder_type='original'):  # 雷达编码器类型: 'original', 'radarbevnet', 'lggd'
         super(RaCFormer, self).__init__(pts_voxel_layer, pts_voxel_encoder,
                              pts_middle_encoder, pts_fusion_layer,
                              img_backbone, pts_backbone, img_neck, pts_neck,
@@ -105,16 +116,79 @@ class RaCFormer(MVXTwoStageDetector):
             self.rhgm = RHGMWrapper(rhgm_cfg=rhgm_cfg)
         
         # ==============================================================================
-        # RadarBEVNet模块初始化 - 替换原有的radar_voxel_encoder和radar_middle_encoder
-        # 来自RCBEVDet，包含双流骨干+RCS-aware BEV编码器
+        # 雷达编码器类型选择 - 支持三种模式切换
+        # 'original': 原始PillarFeatureNet
+        # 'radarbevnet': RadarBEVNet双流编码器
+        # 'lggd': LGGD高斯溅射稠密化
         # ==============================================================================
-        self.use_radar_bev_net = use_radar_bev_net
         
-        # 雷达体素化层保持不变（用于处理RHGM输出的混合点云）
-        self.radar_voxel_layer = Voxelization(**radar_voxel_layer)
+        # 确定编码器类型（兼容旧配置）
+        if use_lggd:
+            self.radar_encoder_type = 'lggd'
+        elif use_radar_bev_net:
+            self.radar_encoder_type = 'radarbevnet'
+        else:
+            self.radar_encoder_type = radar_encoder_type
         
-        if use_radar_bev_net:
-            # 使用RadarBEVNet替换原有编码器
+        self.use_radar_bev_net = use_radar_bev_net or (self.radar_encoder_type == 'radarbevnet')
+        self.use_lggd = use_lggd or (self.radar_encoder_type == 'lggd')
+        
+        # 雷达体素化层（原始和RadarBEVNet模式需要）
+        if self.radar_encoder_type != 'lggd':
+            self.radar_voxel_layer = Voxelization(**radar_voxel_layer)
+        
+        # ==============================================================================
+        # 根据编码器类型初始化对应模块
+        # ==============================================================================
+        
+        if self.radar_encoder_type == 'lggd':
+            # ==============================================================================
+            # LGGD模块初始化 - 可学习高斯几何稠密化
+            # 直接从原始点云生成BEV特征，无需体素化
+            # ==============================================================================
+            if lggd_cfg is None:
+                lggd_cfg = dict(
+                    in_channels=7,
+                    hidden_dim=64,
+                    out_channels=64,
+                    bev_size=(128, 128),
+                    pc_range=(-51.2, -51.2, -5.0, 51.2, 51.2, 3.0),
+                    offset_limit=2.0,
+                    use_gaussian_weight=True,
+                    sigma_scale=1.0,
+                    num_encoder_layers=2,
+                    smoother_kernel_size=3,
+                    enabled=True
+                )
+            self.lggd = LGGD(**lggd_cfg)
+            
+            # LGGD输出维度与后续模块的适配
+            lggd_out_channels = lggd_cfg.get('out_channels', 64)
+            middle_encoder_in_channels = radar_middle_encoder.in_channels
+            
+            if lggd_out_channels != middle_encoder_in_channels:
+                print(f"[INFO] LGGD输出通道({lggd_out_channels})与"
+                      f"radar_middle_encoder输入通道({middle_encoder_in_channels})不匹配，创建适配层")
+                self.lggd_adapter = nn.Sequential(
+                    nn.Conv2d(lggd_out_channels, middle_encoder_in_channels, 1),
+                    nn.BatchNorm2d(middle_encoder_in_channels),
+                    nn.ReLU(inplace=True)
+                )
+                self._use_lggd_adapter = True
+            else:
+                self._use_lggd_adapter = False
+            
+            # 保存BEV尺寸信息
+            self.lggd_bev_size = lggd_cfg.get('bev_size', (128, 128))
+            
+            # LGGD模式下不需要radar_middle_encoder，但保留以便兼容
+            # 我们直接使用LGGD的输出作为BEV特征
+            self._lggd_mode = True
+            
+        elif self.radar_encoder_type == 'radarbevnet':
+            # ==============================================================================
+            # RadarBEVNet模块初始化 - 双流骨干+RCS-aware BEV编码器
+            # ==============================================================================
             if radar_bev_net_cfg is None:
                 radar_bev_net_cfg = dict(
                     in_channels=7,
@@ -129,15 +203,10 @@ class RaCFormer(MVXTwoStageDetector):
                 )
             self.radar_bev_net = RadarBEVNet(**radar_bev_net_cfg)
             
-            # ==============================================================================
             # 维度检查和适配
-            # RadarBEVNet输出维度必须与radar_middle_encoder输入维度一致
-            # 默认都是64通道，直接传递，不需要adapter
-            # ==============================================================================
             radar_out_channels = radar_bev_net_cfg.get('feat_channels', (64,))[-1]
             middle_encoder_in_channels = radar_middle_encoder.in_channels
             
-            # 只有当维度不匹配时才创建adapter
             if radar_out_channels != middle_encoder_in_channels:
                 print(f"[WARNING] RadarBEVNet输出通道({radar_out_channels})与"
                       f"radar_middle_encoder输入通道({middle_encoder_in_channels})不匹配，创建适配层")
@@ -150,15 +219,17 @@ class RaCFormer(MVXTwoStageDetector):
             else:
                 self._use_radar_adapter = False
             
-            # 保留中间编码器用于生成BEV空间特征
             self.radar_middle_encoder = builder.build_middle_encoder(radar_middle_encoder)
-            
-            # 原有的radar_voxel_encoder不再使用，但保留以便回退
             self._original_radar_voxel_encoder = builder.build_voxel_encoder(radar_voxel_encoder)
+            self._lggd_mode = False
+            
         else:
-            # 使用原有的雷达编码器
+            # ==============================================================================
+            # 原始模式 - 使用PillarFeatureNet
+            # ==============================================================================
             self.radar_voxel_encoder = builder.build_voxel_encoder(radar_voxel_encoder)
             self.radar_middle_encoder = builder.build_middle_encoder(radar_middle_encoder)
+            self._lggd_mode = False
 
         # 雷达BEV卷积层
         rad_conv_layers = []
@@ -216,9 +287,10 @@ class RaCFormer(MVXTwoStageDetector):
         Extract features of points.
         
         # ==============================================================================
-        # 修改说明：集成RHGM和RadarBEVNet模块
-        # 1. RHGM模块接入：在雷达数据处理环节，先调用RHGM生成混合点云
-        # 2. RadarBEVNet模块替换：将混合点云传入RadarBEVNet进行特征编码
+        # 修改说明：支持三种雷达编码器模式
+        # 1. 'original': 原始PillarFeatureNet
+        # 2. 'radarbevnet': RadarBEVNet双流编码器
+        # 3. 'lggd': LGGD高斯溅射稠密化模块
         # ==============================================================================
         
         Args:
@@ -235,11 +307,10 @@ class RaCFormer(MVXTwoStageDetector):
             return None
 
         # ==============================================================================
-        # RHGM模块调用 - 生成混合点云
+        # RHGM模块调用 - 生成混合点云（可选，与所有编码器兼容）
         # 来自HGSFusion，输入原始雷达点云+相机语义掩码，输出混合点云
         # ==============================================================================
         if self.use_rhgm and semantic_masks is not None:
-            # 调用RHGM生成混合点云
             hybrid_points, foreground_masks = self.rhgm(
                 radar_points,
                 semantic_masks_list=semantic_masks,
@@ -247,10 +318,36 @@ class RaCFormer(MVXTwoStageDetector):
                 intrinsics_list=intrinsics,
                 img_shape=img_shape
             )
-            # 使用混合点云替代原始点云
             radar_points = hybrid_points
 
-        # 将z坐标设为0（保持原有逻辑）
+        # ==============================================================================
+        # LGGD模式 - 直接从点云生成BEV特征，无需体素化
+        # ==============================================================================
+        if self.radar_encoder_type == 'lggd':
+            # 将z坐标设为0（保持与其他模式一致）
+            for i, radar_point in enumerate(radar_points):
+                radar_point[:, 2] = 0
+                radar_points[i] = radar_point
+            
+            # 使用LGGD直接生成BEV特征
+            # 输入: 点云列表 [B] x [N_i, C]
+            # 输出: BEV特征 [B, out_channels, H, W]
+            rad_bev_feas = self.lggd(radar_points)  # [B, lggd_out_channels, H, W]
+            
+            # 维度适配（如果需要）
+            if hasattr(self, '_use_lggd_adapter') and self._use_lggd_adapter:
+                rad_bev_feas = self.lggd_adapter(rad_bev_feas)
+            
+            # 通过BEV卷积层
+            rad_bev_feas = self.radar_bev_conv(rad_bev_feas)
+            
+            return rad_bev_feas
+
+        # ==============================================================================
+        # 原始模式和RadarBEVNet模式 - 需要体素化
+        # ==============================================================================
+        
+        # 将z坐标设为0
         for i, radar_point in enumerate(radar_points):
             radar_point[:, 2] = 0
             radar_points[i] = radar_point
@@ -259,27 +356,25 @@ class RaCFormer(MVXTwoStageDetector):
         voxels, num_points, coors = self.radar_voxelize(radar_points)
         
         # ==============================================================================
-        # RadarBEVNet模块调用 - 替换原有的pillar编码器
-        # 来自RCBEVDet，使用双流骨干+RCS-aware BEV编码器
+        # RadarBEVNet模式
         # ==============================================================================
-        if self.use_radar_bev_net:
+        if self.radar_encoder_type == 'radarbevnet':
             # 使用RadarBEVNet进行特征编码
-            # 输入: voxels [N_voxels, max_points, in_channels]
-            # 输出: [N_voxels, feat_channels] 或 ([N_voxels, feat_channels], [N_voxels, in_channels]) 如果 return_rcs=True
             radar_bev_output = self.radar_bev_net(voxels, num_points, coors)
             
             # 处理返回值：如果return_rcs=True，返回的是元组(features, rcs)
             if isinstance(radar_bev_output, tuple):
                 radar_features = radar_bev_output[0].to(torch.float32)
-                # rcs_features = radar_bev_output[1]  # RCS特征，暂未使用
             else:
                 radar_features = radar_bev_output.to(torch.float32)
             
-            # 维度适配: 只有当RadarBEVNet输出与middle_encoder输入不匹配时才使用adapter
+            # 维度适配
             if self._use_radar_adapter:
                 radar_features = self.radar_bev_net_adapter(radar_features)
         else:
-            # 原有流程：使用原始的radar_voxel_encoder
+            # ==============================================================================
+            # 原始模式 - 使用PillarFeatureNet
+            # ==============================================================================
             radar_features = self.radar_voxel_encoder(voxels, num_points, coors).to(torch.float32)
 
         batch_size = coors[-1, 0] + 1

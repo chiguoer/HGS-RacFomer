@@ -15,10 +15,15 @@ from .radar_bev_net import RadarBEVNet, RadarBEVNetWrapper
 # RWHI模块 - RCS加权混合锚点初始化
 from .rwhi import RWHIModule, RWHIQueryGenerator
 
+# LGGD模块 - 可学习高斯几何稠密化
+from .lggd import LGGD, LGGDWrapper, build_radar_encoder
+
 __all__ = [
     'RaCFormer', 'RaCFormer_head', 'RaCFormerTransformer',
     # 融合模块
     'RHGM', 'RHGMWrapper', 'RadarBEVNet', 'RadarBEVNetWrapper',
     # RWHI模块
-    'RWHIModule', 'RWHIQueryGenerator'
+    'RWHIModule', 'RWHIQueryGenerator',
+    # LGGD模块
+    'LGGD', 'LGGDWrapper', 'build_radar_encoder'
 ]

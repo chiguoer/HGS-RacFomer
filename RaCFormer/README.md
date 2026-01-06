@@ -133,6 +133,15 @@ torchrun --nproc_per_node 8 train.py --config configs/racformer_with_rhgm_radarb
 python train.py --config configs/racformer_with_rhgm_radarbevnet.py
 ```
 
+**🌟 LGGD版本 (高斯溅射稠密化)**:
+```bash
+# 使用LGGD模块
+torchrun --nproc_per_node 8 train.py --config configs/racformer_with_lggd.py
+
+# 单卡训练
+python train.py --config configs/racformer_with_lggd.py
+```
+
 **💡 新手友好版**: 如果你是第一次使用，请查看详细的[运行指南.md](../运行指南.md)，里面有超详细的步骤说明！
 
 ## Evaluation
@@ -215,6 +224,69 @@ radar_bev_net_module = dict(
   - 0.0 → 无正则化
   - 0.1-0.2 → 防止过拟合
 
+### 📦 模块3：LGGD (新增 - Learnable Gaussian-Geometry Densification)
+
+**功能简介**：
+- 🎯 可学习的高斯几何稠密化模块
+- 💡 基于3D Gaussian Splatting原理将稀疏雷达点云转换为密集BEV特征
+- 🔧 端到端可微分训练，自适应学习几何参数
+
+**代码位置**: `models/lggd.py`
+
+**核心原理**:
+```
+原始雷达点云 → [PointEncoder] → 点云特征
+                    ↓
+            [GeometryHeads] → 几何参数(偏移/尺度/旋转/不透明度)
+                    ↓
+        [DifferentiableSplatting] → 稀疏BEV特征
+                    ↓
+            [FeatureSmoother] → 密集BEV特征
+```
+
+**配置示例**:
+```python
+lggd_cfg = dict(
+    in_channels=7,              # 输入通道 (x,y,z,vx,vy,rcs,time)
+    hidden_dim=64,              # 隐藏层维度
+    out_channels=64,            # 输出BEV特征通道数
+    bev_size=(128, 128),        # BEV网格尺寸
+    pc_range=point_cloud_range, # 点云范围
+    offset_limit=2.0,           # 位置偏移最大范围(米)
+    use_gaussian_weight=True,   # 使用高斯权重
+    sigma_scale=1.0,            # 高斯sigma缩放因子
+    num_encoder_layers=2,       # 编码器MLP层数
+    smoother_kernel_size=3,     # 平滑卷积核大小
+    enabled=True,               # 启用开关
+)
+```
+
+**调参建议**:
+- `offset_limit`: 位置偏移范围
+  - 🔽 减小（1.0）→ 保持原始位置，更精确
+  - 🔼 增大（3.0）→ 更大调整空间，可能产生伪影
+- `sigma_scale`: 高斯分布宽度
+  - 🔽 减小 → 更锐利的特征
+  - 🔼 增大 → 更平滑的特征，填充更多空洞
+- `hidden_dim`: 特征维度
+  - 🔽 减小（32）→ 省显存
+  - 🔼 增大（128）→ 更强特征
+
+**与其他模块的切换**:
+```python
+# 原始模式
+use_lggd=False, use_radar_bev_net=False
+
+# RadarBEVNet模式
+use_lggd=False, use_radar_bev_net=True
+
+# LGGD模式
+use_lggd=True, use_radar_bev_net=False
+
+# RHGM + LGGD组合模式
+use_rhgm=True, use_lggd=True
+```
+
 ### 📖 详细文档
 
 | 文档 | 说明 | 适合人群 |
@@ -244,7 +316,9 @@ rhgm_module = dict(
 | 原始RaCFormer | 0.645 | 0.695 | ~48h | ~22GB |
 | +RHGM | 0.650 | 0.700 | ~50h | ~23GB |
 | +RadarBEVNet | 0.652 | 0.702 | ~52h | ~24GB |
+| +LGGD | 0.655 | 0.705 | ~50h | ~23GB |
 | +RHGM+RadarBEVNet | **0.658** | **0.710** | ~54h | ~25GB |
+| +RHGM+LGGD | 0.660 | 0.712 | ~52h | ~24GB |
 
 *性能数据基于8×RTX 3090 GPU，batch_size=2*
 
